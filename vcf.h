@@ -282,7 +282,7 @@ typedef struct vcf_file_t {
 
 typedef struct vcf_line_t {
   char* chrom;
-  int pos;
+  uint32_t pos;
   float af;
   // AF, EAS_AF, EUR_AF, AFR_AF, AMR_AF, SAS_AF
   char* ref;

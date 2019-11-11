@@ -25,20 +25,14 @@ int fileread(FILE* f, char* buffer, int size) {
 // init kseq struct
 KSEQ_INIT(gzFile, gzread)
 
-// creates string:[array of uint8] hash
-// to map chrom names to sequences
-KHASH_MAP_INIT_STR(refSeq, char*);
-
-// creates string:uint32 hash
-// to map chrom names to lengths
-KHASH_MAP_INIT_STR(refLen, uint32_t);
-
 // creates string:int hash
-// to map chrom names to IDs (tid)
-KHASH_MAP_INIT_STR(refId, int);
+// to map chrom names to indices (into refs and rlens)
+KHASH_MAP_INIT_STR(refName, uint32_t);
 
 int main(int argc, char *argv[]) {
-  srand(time(0));
+  time_t now = time(0);
+  fprintf(stderr, "Random seed (time): %ld\n", now);
+  srand(now);
 
   if(argc < 2) {
     fprintf(stderr, "Usage: sg <reference FASTA> <VCF>\n");
@@ -53,9 +47,16 @@ int main(int argc, char *argv[]) {
 
   // load ref FASTA file
   //
-  khash_t(refSeq) *ref = kh_init(refSeq);
-  khash_t(refLen) *rlen = kh_init(refLen);
-  khash_t(refId) *rid = kh_init(refId);
+  khash_t(refName) *ref_lookup = kh_init(refName);
+
+  kvec_t(char*) refs;
+  kv_init(refs);
+
+  kvec_t(uint32_t) rlens;
+  kv_init(rlens);
+
+  kvec_t(char*) rnames;
+  kv_init(rnames);
 
   gzFile gzfp;
   kseq_t *seq;
@@ -69,29 +70,30 @@ int main(int argc, char *argv[]) {
   fprintf(stderr, "Reading fasta file: %s\n", ref_fasta);
   seq = kseq_init(gzfp);
 
-  int refid = 0;
+  uint32_t refids = 0;
+  uint32_t rid;
   char* dup;
   while ((l = kseq_read(seq)) >= 0) {
     // name: seq->name.s, seq: seq->seq.s, length: l
-    //printf("Reading %s (%i bp).\n", seq->name.s, l);
+    //fprintf(stderr, "Reading %s (%i bp).\n", seq->name.s, l);
 
     dup = malloc(sizeof(char) * (strlen(seq->name.s) + 1));
     dup[strlen(seq->name.s)] = '\0';
     memcpy(dup, seq->name.s, sizeof(char) * strlen(seq->name.s));
 
-    // seq array
-    bin = kh_put(refSeq, ref, dup, &absent);
+    // seq name lookup
+    bin = kh_put(refName, ref_lookup, dup, &absent);
+    kh_val(ref_lookup, bin) = refids++;
+    kv_push(char*, rnames, dup);
+
     // copy the seq read from kseq to a new heap here - this is pretty fast and the easiest way to implement right now (see kseq.h)
-    kh_val(ref, bin) = malloc(sizeof(char)*l);
-    memcpy(kh_val(ref, bin), seq->seq.s, sizeof(char)*l);
+    char* s = malloc(sizeof(char)*(l+1));
+    memcpy(s, seq->seq.s, sizeof(char)*l);
+    s[l] = '\0';
+    kv_push(char*, refs, s);
 
     // sequence length
-    bin = kh_put(refLen, rlen, dup, &absent);
-    kh_val(rlen, bin) = l;
-
-    // ref ID (indexed order in FASTA)
-    bin = kh_put(refId, rid, dup, &absent);
-    kh_val(rid, bin) = refid++;
+    kv_push(uint32_t, rlens, l);
   }
 
   gzclose(gzfp);
@@ -113,31 +115,25 @@ int main(int argc, char *argv[]) {
   uint64_t found_bp = 0;
   uint64_t unfound_bp = 0;
   for(i = 0; i < vcf.header.num_sequences; i++) {
-    fprintf(stderr, "%s\n", vcf.header.sequences[i]);
-    bin = kh_get(refSeq, ref, vcf.header.sequences[i]);
-    if(bin == kh_end(ref)) { // absent
+    bin = kh_get(refName, ref_lookup, vcf.header.sequences[i]);
+    if(bin == kh_end(ref_lookup)) { // absent
       sprintf(modchrom, "chr%s", vcf.header.sequences[i]);
-      bin = kh_get(refSeq, ref, modchrom);
-      if(bin == kh_end(ref)) { // absent
+      bin = kh_get(refName, ref_lookup, modchrom);
+      if(bin == kh_end(ref_lookup)) { // absent
         fprintf(stderr, "WARNING: chromosome '%s' in VCF not found in ref FASTA\n", vcf.header.sequences[i]);
         unfound_bp = unfound_bp + vcf.header.sequence_lengths[i];
         continue;
       } else {
-        // put the names WITHOUT chr into the hash, reusing the VCF header names and pointing to the same seq
-        bin2 = kh_put(refSeq, ref, vcf.header.sequences[i], &absent);
-        kh_val(ref, bin2) = kh_val(ref, bin);
-        bin3 = kh_get(refLen, rlen, modchrom);
-        fprintf(stderr, "%s 10m-10m100: ", vcf.header.sequences[i]);
-        for(j = 10000000; j < 10000100; j++) {
-          fprintf(stderr, "%c", kh_val(ref, bin2)[j]);
-        }
-        fprintf(stderr, "\n");
+        rid = kh_val(ref_lookup, bin);
+        // put the names WITHOUT chr into the hash, reusing the VCF header names
+        bin2 = kh_put(refName, ref_lookup, vcf.header.sequences[i], &absent);
+        kh_val(ref_lookup, bin2) = rid;
       }
     } else {
-      bin3 = kh_get(refLen, rlen, vcf.header.sequences[i]);
+      rid = kh_val(ref_lookup, bin);
     }
-    if(vcf.header.sequence_lengths[i] != kh_val(rlen, bin3)) {
-      fprintf(stderr, "ERROR: chromosome '%s' sizes don't match: %u in VCF, %u in FASTA\n", vcf.header.sequence_lengths[i], kh_val(rlen, bin3));
+    if(vcf.header.sequence_lengths[i] != kv_A(rlens, rid)) {
+      fprintf(stderr, "ERROR: chromosome '%s' sizes don't match: %u in VCF, %u in FASTA\n", vcf.header.sequence_lengths[i], kv_A(rlens, rid));
       unfound_bp = unfound_bp + vcf.header.sequence_lengths[i];
       return 1;
     }
@@ -151,18 +147,29 @@ int main(int argc, char *argv[]) {
   fprintf(stderr, "Processing variants...\n");
   uint32_t n_snps = 0;
   uint32_t variants_added = 0;
+  uint32_t prev_pos = 0;
+  char prev_ref;
   vcf_line_t *entry = vcf_read_line(&vcf);
   while(entry != NULL) {
     n_snps++;
     if(strlen(entry->ref) == 1 && strlen(entry->alt) == 1 && ((double)rand()) / RAND_MAX < entry->af) {
-      bin = kh_get(refSeq, ref, entry->chrom);
-      if(bin != kh_end(ref)) {
-        if(kh_val(ref, bin)[entry->pos-1] != entry->ref[0] && kh_val(ref, bin)[entry->pos-1]-32 != entry->ref[0]) { // may be upper or lower case in ref
-          fprintf(stderr, "ERROR: %s -> %s at %s:%d (but we found a %c)\n", entry->ref, entry->alt, entry->chrom, entry->pos, kh_val(ref, bin)[entry->pos-1]);
+      bin = kh_get(refName, ref_lookup, entry->chrom);
+      if(bin != kh_end(ref_lookup)) {
+        rid = kh_val(ref_lookup, bin);
+        // check if our ref seq agrees with the VCF
+        if(kv_A(refs, rid)[entry->pos-1] != entry->ref[0] && kv_A(refs, rid)[entry->pos-1]-32 != entry->ref[0]) { // may be upper or lower case in ref
+          // note: sometimes there are two variants at the same site and it may have been changed already...
+          if(prev_pos != entry->pos || prev_ref != entry->ref[0]) {
+            fprintf(stderr, "ERROR: %s -> %s at %s (rid %u):%d (but we found %c)\n", entry->ref, entry->alt, entry->chrom, rid, entry->pos, kv_A(refs, rid)[entry->pos-1]);
+            break;
+          }
         }
         //fprintf(stderr, "Adding %s -> %s at %s:%d\n", entry->ref, entry->alt, entry->chrom, entry->pos);
+        kv_A(refs, rid)[entry->pos-1] = entry->alt[0];
         variants_added++;
       }
+      prev_pos = entry->pos;
+      prev_ref = entry->ref[0];
     }
     vcf_destroy_line(entry);
 
@@ -181,6 +188,21 @@ int main(int argc, char *argv[]) {
 
   fprintf(stderr, "%u SNPs evaluated\n", n_snps);
   fprintf(stderr, "%u variants added\n", variants_added);
+
+  // print new seqs
+  fprintf(stderr, "Writing new FASTA file (to stdout)...\n");
+  for(rid = 0; rid < refids; rid++) {
+    fprintf(stdout, ">%s\n", kv_A(rnames, rid));
+    for(i = 0; i < kv_A(rlens, rid); i++) {
+      fprintf(stdout, "%c", kv_A(refs, rid)[i]);
+      if(i%80 == 79) {
+        fprintf(stdout, "\n");
+      }
+    }
+    if(i%80 != 80) {
+      fprintf(stdout, "\n");
+    }
+  }
 
   // free the hashes, but be aware half the keys in the ref hash are already free because we reused them from the VCF
 

@@ -165,11 +165,11 @@ vcf_file_t vcf_init(char* f) {
   }
 
   vcf_header_t header;
-  printf("Parsing header\n");
+  fprintf(stderr, "Parsing header\n");
   header = parse_header(vcf_fp);
 
-  printf("VCF version %s\n", header.version);
-  printf("%d sequences found\n", header.num_sequences);
+  fprintf(stderr, "VCF version %s\n", header.version);
+  fprintf(stderr, "%d sequences found\n", header.num_sequences);
 
   vcf_file_t vcf = {vcf_fp, header, 0};
 

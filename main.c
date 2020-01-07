@@ -30,9 +30,6 @@ KSEQ_INIT(gzFile, gzread)
 KHASH_MAP_INIT_STR(refName, uint32_t);
 
 int main(int argc, char *argv[]) {
-  time_t now = time(0);
-  fprintf(stderr, "Random seed (time): %ld\n", now);
-  srand(now);
 
   if(argc < 2) {
     fprintf(stderr, "Usage: sg <reference FASTA> <VCF>\n");
@@ -41,6 +38,15 @@ int main(int argc, char *argv[]) {
   }
   char *ref_fasta = argv[1];
   char *vcf_file = argv[2];
+  int seed = argc > 2 ? atoi(argv[3]) : 0;
+  if(seed == 0) {
+    time_t now = time(0);
+    fprintf(stderr, "Random seed (time): %ld\n", now);
+    srand(now);
+  } else {
+    fprintf(stderr, "Random seed: %ld\n", seed);
+    srand(seed);
+  }
 
   khint_t bin, bin2, bin3; // hash bin (result of kh_put)
   int absent;
